@@ -4,16 +4,18 @@
 
 
 int main(int argc, char** argv) {
-     if (argc != 2) {
+     if (argc != 3) {
+          std::cerr << "Usage: " << argv[0] << " <ip> <port>" << std::endl;
           std::cerr << "Incorrect number of arguments. Try to use key --help." << std::endl;
           exit(-1);
      }
      
      bool success = true;
-     int port = std::stoi(argv[1]);
+     const char* ip = argv[1];
+     int port = std::stoi(argv[2]);
      srand(time(0));
      Message msg = { };
-     auto dest_address = local_addr(port);
+     auto dest_address = remote_addr(ip, port);
      int sock_fd = check(make_socket(SOCK_STREAM));
      check(connect(sock_fd, (sockaddr * ) & dest_address, sizeof(dest_address)));
 

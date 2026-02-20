@@ -4,14 +4,15 @@
 #include <openssl/err.h>
 
 int main(int argc, char** argv) {
-     if (argc != 2) {
-          std::cerr << "Usage: " << argv[0] << " <port>" << std::endl;
+     if (argc != 3) {
+          std::cerr << "Usage: " << argv[0] << " <ip> <port>" << std::endl;
           std::cerr << "Incorrect number of arguments. Try to use key --help." << std::endl;
           exit(-1);
      }
      
      bool success = true;
-     int port = std::stoi(argv[1]);
+     const char* ip = argv[1];
+     int port = std::stoi(argv[2]);
      srand(time(0));
      Message msg = { };
      std::unordered_set<int> numbers;

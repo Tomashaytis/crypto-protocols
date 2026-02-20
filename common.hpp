@@ -12,6 +12,8 @@
 #include "check.hpp"
 #include "signal.h"
 #include "sys/prctl.h"
+#include <netinet/in.h>
+#include <stdexcept>
 
 constexpr unsigned short SERVER_PORT = 60003;
 
@@ -30,19 +32,16 @@ inline std::ostream &operator<<(std::ostream &s, const sockaddr_in &addr)
              << ":" << std::to_string(ntohs(addr.sin_port));
 }
 
+// Convert sockaddr_in to string in format "ip:port"
 std::string str_addr(const sockaddr_in &addr)
 {
-    union
-    {
-        in_addr_t x;
-        char c[sizeof(in_addr)];
-    } t{};
-    t.x = addr.sin_addr.s_addr;
-    return std::to_string(int(t.c[0])) + 
-    "." + std::to_string(int(t.c[1])) + 
-    "." + std::to_string(int(t.c[2])) + 
-    "." + std::to_string(int(t.c[3])) + 
-    ":" + std::to_string(ntohs(addr.sin_port));
+    char ip[INET_ADDRSTRLEN] = {0};
+
+    if (!inet_ntop(AF_INET, &addr.sin_addr, ip, sizeof(ip))) {
+        return "?.?.?.?:" + std::to_string(ntohs(addr.sin_port));
+    }
+
+    return std::string(ip) + ":" + std::to_string(ntohs(addr.sin_port));
 }
 
 inline int make_socket(int type)
@@ -60,12 +59,37 @@ inline int make_socket(int type)
         return -1;
     }
 }
+
 inline sockaddr_in local_addr(unsigned short port)
 {
     sockaddr_in addr{};
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK); // 127.0.0.1
     addr.sin_port = htons(port);
     addr.sin_family = AF_INET;
+    return addr;
+}
+
+inline sockaddr_in any_addr(unsigned short port)
+{
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = INADDR_ANY;   // 0.0.0.0
+
+    return addr;
+}
+
+
+inline sockaddr_in remote_addr(const char* ip, unsigned short port)
+{
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+
+    if (inet_pton(AF_INET, ip, &addr.sin_addr) <= 0) {
+        throw std::runtime_error("Invalid IP address");
+    }
+
     return addr;
 }
 

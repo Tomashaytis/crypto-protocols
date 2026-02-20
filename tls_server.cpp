@@ -44,7 +44,7 @@ void server_work(std::string server_name, int port, bool is_daemon_mode, SSL_CTX
     std::string log_message = server_name + "::" + std::to_string(getpid()) + " >> I start work\n";
     check(write(fd, log_message.c_str(), log_message.size()));
     Message msg{};
-    auto server_address = local_addr(port);
+    auto server_address = any_addr(port);
     auto listening_socket = check(make_socket(SOCK_STREAM));
     check(bind(listening_socket, (sockaddr *)&server_address, sizeof(server_address)));
     check(listen(listening_socket, 2));
