@@ -1,5 +1,7 @@
 #include "common.hpp"
 #include <unordered_set>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 
 int main(int argc, char** argv) {
      if (argc != 2) {
@@ -17,18 +19,55 @@ int main(int argc, char** argv) {
      int sock_fd = check(make_socket(SOCK_STREAM));
      check(connect(sock_fd, (sockaddr * ) & dest_address, sizeof(dest_address)));
      
+// tls init
+     SSL_library_init();
+     OpenSSL_add_all_algorithms();
+     SSL_load_error_strings();
+
+     SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
+     if (!ctx) {
+          ERR_print_errors_fp(stderr);
+          exit(1);
+     }
+
+     // Rightnow no checking
+     SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, nullptr);
+
+     // May be use when we need verify,(don't forget line 54-57)
+     // SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, nullptr);
+     // if (!SSL_CTX_load_verify_locations(ctx, "../server.crt", nullptr)) {
+     //      ERR_print_errors_fp(stderr);
+     //      exit(1);
+     // }
+
+     SSL *ssl = SSL_new(ctx);
+     SSL_set_fd(ssl, sock_fd);
+
+     if (SSL_connect(ssl) <= 0) {
+          ERR_print_errors_fp(stderr);
+          SSL_free(ssl);
+          SSL_CTX_free(ctx);
+          close(sock_fd);
+          exit(1);
+     }
+  
+     // if (SSL_get_verify_result(ssl) != X509_V_OK) {
+     //      std::cerr << "Cert verify failed\n";
+     //      exit(1);
+     // }
+
      int min = 0, max = 10000;
      
      msg = {0, Start};
      msg.to_net_order();
-     send(sock_fd, &msg, sizeof msg, MSG_WAITALL);
+     SSL_write(ssl, &msg, sizeof(msg));
      msg = {min, SetMin};
      msg.to_net_order();
-     send(sock_fd, &msg, sizeof msg, MSG_WAITALL);
+     SSL_write(ssl, &msg, sizeof(msg));
      msg = {max, SetMax};
      msg.to_net_order();
-     send(sock_fd, &msg, sizeof msg, MSG_WAITALL);
-     auto size = check_except(recv(sock_fd, &msg, sizeof(msg), MSG_WAITALL), ENOTCONN);
+     SSL_write(ssl, &msg, sizeof(msg));
+     auto size = check_except(SSL_read(ssl, &msg, sizeof(msg)), ENOTCONN);
      
      if (size < 1) {
           close(sock_fd);
@@ -46,8 +85,8 @@ int main(int argc, char** argv) {
                std::cout << "Bot >> Trying a number " << number << std::endl;
                msg = {number, Number};
                msg.to_net_order();
-               send(sock_fd, &msg, sizeof msg, MSG_WAITALL);
-               auto size = check_except(recv(sock_fd, &msg, sizeof(msg), MSG_WAITALL), ENOTCONN);
+               SSL_write(ssl, &msg, sizeof(msg));
+               auto size = check_except(SSL_read(ssl, &msg, sizeof(msg)), ENOTCONN);
                if (size < 1) {
                     success = false;
                     break;
@@ -67,6 +106,10 @@ int main(int argc, char** argv) {
      } else
           std::cout << "Bot >> The max value has been less or equal to the min value\n";
      
+              
+     SSL_shutdown(ssl);
+     SSL_free(ssl);
+     SSL_CTX_free(ctx);
      close(sock_fd);
      
      if (!success)
