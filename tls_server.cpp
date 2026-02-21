@@ -1,6 +1,7 @@
 #include "common.hpp"
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <thread>
 
 SSL_CTX* create_ssl_context() {
     // Контекст для сервера
@@ -36,224 +37,84 @@ void server_work(std::string server_name, int port, bool is_daemon_mode, SSL_CTX
     int fd = STDOUT_FILENO;
     
     if (is_daemon_mode) {
-        unlink("GuessLog.log");
-        fd = check(open("GuessLog.log", O_RDWR | O_CREAT | O_SYNC, S_IRWXU));
+        unlink("ServerLog.log");
+        fd = check(open("ServerLog.log", O_RDWR | O_CREAT | O_SYNC, S_IRWXU));
     }
     
-    sem_t *sem = sem_open("/guess_sem", O_CREAT, S_IWUSR | S_IRUSR, 1);
+    sem_t *sem = sem_open("/server_sem", O_CREAT, S_IWUSR | S_IRUSR, 1);
     std::string log_message = server_name + "::" + std::to_string(getpid()) + " >> I start work\n";
     check(write(fd, log_message.c_str(), log_message.size()));
-    Message msg{};
+    
     auto server_address = any_addr(port);
     auto listening_socket = check(make_socket(SOCK_STREAM));
     check(bind(listening_socket, (sockaddr *)&server_address, sizeof(server_address)));
     check(listen(listening_socket, 2));
-    int connected_socket = 0;
-    pid_t pid = getpid();
     
-    while (true) {
-        sockaddr_in connected_address{};
-        socklen_t addrlen = sizeof(connected_address);
-        connected_socket = accept(listening_socket, (sockaddr *)&connected_address, &addrlen);
-        pid = check(fork());
-        
-        if (pid == 0) {
-            
-            // Создание SSL объекта
-            SSL *ssl = SSL_new(ctx);
-            SSL_set_fd(ssl, connected_socket);
+    sockaddr_in connected_address{};
+    socklen_t addrlen = sizeof(connected_address);
+    int connected_socket = accept(listening_socket, (sockaddr *)&connected_address, &addrlen);
     
-            // TLS Handshake
-            if (SSL_accept(ssl) <= 0) {
-                ERR_print_errors_fp(stderr);
-                SSL_free(ssl);
-                close(connected_socket);
-                exit(0);
+    // Создание SSL объекта ПОСЛЕ accept
+    SSL *ssl = SSL_new(ctx);
+    SSL_set_fd(ssl, connected_socket);
+
+    // TLS Handshake
+    if (SSL_accept(ssl) <= 0) {
+        ERR_print_errors_fp(stderr);
+        SSL_free(ssl);
+        close(connected_socket);
+        return;
+    }
+    
+    srand(getpid());
+    prctl(PR_SET_PDEATHSIG, SIGTERM);
+    
+    {
+        SemGuard sem_guard(sem);
+        log_message = server_name + "::" + std::to_string(getpid()) + " >> Connected from " + str_addr(connected_address) + "\n";
+        check(write(fd, log_message.c_str(), log_message.size()));
+    }
+    
+    // Поток для чтения сообщений от клиента
+    std::thread reader_thread([ssl, fd, sem, server_name, connected_address]() {
+        char buffer[4096];
+        while (true) {
+            int bytes = SSL_read(ssl, buffer, sizeof(buffer) - 1);
+            if (bytes <= 0) {
+                break;
             }
-    
-            srand(getpid());
-            prctl(PR_SET_PDEATHSIG, SIGTERM);
-            nice(10);
+            buffer[bytes] = '\0';
             
-            
-            if (connected_socket == -1)
-                exit(0);
-                
             {
                 SemGuard sem_guard(sem);
-                log_message = server_name + "::" + std::to_string(getpid()) + " >> Connected from " + str_addr(connected_address) + "\n";
-                check(write(fd, log_message.c_str(), log_message.size()));
+                std::string msg = server_name + "::" + std::to_string(getpid()) + 
+                                " >> Client: " + buffer + "\n";
+                write(fd, msg.c_str(), msg.size());
             }
-            
-            while (true) {
-                int min, max, guessed_number;
-                auto size = SSL_read(ssl, &msg, sizeof(msg));
-                if (size < 1) {
-                    {
-                        SemGuard sem_guard(sem);
-                        log_message = server_name + "::" + std::to_string(getpid()) + " >> Disonnected from " + str_addr(connected_address) + "\n";
-                        check(write(fd, log_message.c_str(), log_message.size()));
-                    }
-                    
-                    SSL_shutdown(ssl);
-                    SSL_free(ssl);    
-                    close(connected_socket);
-                    exit(0);
-                }
-                
-                msg.to_host_order();
-                {
-                    SemGuard sem_guard(sem);
-                    log_message = server_name + "::" + std::to_string(getpid()) + "::" + str_addr(connected_address) + " >> Receive a message " + str_message(msg) + "\n";
-                    check(write(fd, log_message.c_str(), log_message.size()));
-                }
-                
-                if (msg.status != Start) {
-                    msg = {0, InvalidStatus};
-                    {
-                        SemGuard sem_guard(sem);
-                        log_message = server_name + "::" + std::to_string(getpid()) + "::" + str_addr(connected_address) + " >> Send a message " + str_message(msg) + "\n";
-                        check(write(fd, log_message.c_str(), log_message.size()));
-                    }
-                    
-                    msg.to_net_order();
-                    SSL_write(ssl, &msg, sizeof(msg));
-                    continue;
-                }
-
-                bool is_set_min = false;
-                bool is_set_max = false;
-                while (!is_set_min || !is_set_max)
-                {
-                    auto size = SSL_read(ssl, &msg, sizeof(msg));
-                    if (size < 1) {
-                        {
-                            SemGuard sem_guard(sem);
-                            log_message = server_name + "::" + std::to_string(getpid()) + " >> Disonnected from " + str_addr(connected_address) + "\n";
-                            check(write(fd, log_message.c_str(), log_message.size()));
-                        }
-                        
-                        SSL_shutdown(ssl);
-                        SSL_free(ssl);   
-                        close(connected_socket);
-                        return;
-                    }
-                    
-                    msg.to_host_order();
-                    {
-                        SemGuard sem_guard(sem);
-                        log_message = server_name + "::" + std::to_string(getpid()) + "::" + str_addr(connected_address) + " >> Receive a message " + str_message(msg) + "\n";
-                        check(write(fd, log_message.c_str(), log_message.size()));
-                    }
-                    
-                    switch (msg.status) {
-                    case SetMin:
-                        min = msg.data;
-                        is_set_min = true;
-                        break;
-                    case SetMax:
-                        max = msg.data;
-                        is_set_max = true;
-                        break;
-                    default:
-                        msg = {0, InvalidStatus};
-                        {
-                            SemGuard sem_guard(sem);
-                            log_message = server_name + "::" + std::to_string(getpid()) + "::" + str_addr(connected_address) + " >> Send a message " + str_message(msg) + "\n";
-                            check(write(fd, log_message.c_str(), log_message.size()));
-                        }
-                        msg.to_net_order();
-                        SSL_write(ssl, &msg, sizeof(msg));
-                        break;
-                    }
-                }
-                if (max <= min) {
-                    msg = {0, InvalidData};
-                    {
-                        SemGuard sem_guard(sem);
-                        log_message = server_name + "::" + std::to_string(getpid()) + "::" + str_addr(connected_address) + " >> Send a message " + str_message(msg) + "\n";
-                        check(write(fd, log_message.c_str(), log_message.size()));
-                    }
-                    
-                    msg.to_net_order();
-                    SSL_write(ssl, &msg, sizeof(msg));
-                    continue;
-                }
-                guessed_number = min + rand() % (max - min + 1);
-                msg = {0, Guess};
-                {
-                    SemGuard sem_guard(sem);
-                    log_message = server_name + "::" + std::to_string(getpid()) + "::" + str_addr(connected_address) + " >> Send a message " + str_message(msg) + "\n";
-                    check(write(fd, log_message.c_str(), log_message.size()));
-                }
-                msg.to_net_order();
-                SSL_write(ssl, &msg, sizeof(msg));
-                
-                while (true) {
-                    auto size = SSL_read(ssl, &msg, sizeof(msg));
-                    if (size < 1) {
-                        {
-                            SemGuard sem_guard(sem);
-                            log_message = server_name + "::" + std::to_string(getpid()) + " >> Disonnected from " + str_addr(connected_address) + "\n";
-                            check(write(fd, log_message.c_str(), log_message.size()));
-                        }
-                        
-                        SSL_shutdown(ssl);
-                        SSL_free(ssl);   
-                        close(connected_socket);
-                        exit(0);
-                    }
-                    
-                    msg.to_host_order();
-                    {
-                        SemGuard sem_guard(sem);
-                        log_message = server_name + "::" + std::to_string(getpid()) + "::" + str_addr(connected_address) + " >> Receive a message " + str_message(msg) + "\n";
-                        check(write(fd, log_message.c_str(), log_message.size()));
-                    }
-                    
-                    if (msg.status == Restart)
-                        break;
-                        
-                    if (msg.status != Number) {
-                        msg = {0, InvalidStatus};
-                        {
-                            SemGuard sem_guard(sem);
-                            log_message = server_name + "::" + std::to_string(getpid()) + "::" + str_addr(connected_address) + " >> Send a message " + str_message(msg) + "\n";
-                            check(write(fd, log_message.c_str(), log_message.size()));
-                        }
-                        msg.to_net_order();
-                        SSL_write(ssl, &msg, sizeof(msg));
-                        continue;
-                    }
-
-                    int number = msg.data;
-                    if (number < min || number > max)
-                        msg = {0, InvalidData};
-                    else if (number == guessed_number)
-                        msg = {0, Equal};
-                    else if (number > guessed_number)
-                        msg = {0, Less};
-                    else
-                        msg = {0, Large};
-                    {
-                        SemGuard sem_guard(sem);
-                        log_message = server_name + "::" + std::to_string(getpid()) + "::" + str_addr(connected_address) + " >> Send a message " + str_message(msg) + "\n";
-                        check(write(fd, log_message.c_str(), log_message.size()));
-                    }
-                    msg.to_net_order();
-                    SSL_write(ssl, &msg, sizeof(msg));
-                    msg.to_host_order();
-                    if (msg.status == Equal)
-                        break;
-                }
-            }
-            SSL_shutdown(ssl);
-            SSL_free(ssl);   
-            close(connected_socket);
-            exit(0);
         }
-        close(connected_socket);
+    });
+    
+    // Основной поток для отправки сообщений от сервера
+    std::string input;
+    while (std::getline(std::cin, input)) {
+        if (input == "exit") break;
+        
+        SSL_write(ssl, input.c_str(), input.length());
+        
+        {
+            SemGuard sem_guard(sem);
+            std::string msg = server_name + "::" + std::to_string(getpid()) + 
+                            " >> Me: " + input + "\n";
+            write(fd, msg.c_str(), msg.size());
+        }
     }
+    
+    reader_thread.detach(); 
+    
+    SSL_shutdown(ssl);
+    SSL_free(ssl);
+    close(connected_socket);
+    close(listening_socket);
 }
 
 int main(int argc, char **argv) {
@@ -282,8 +143,8 @@ int main(int argc, char **argv) {
             std::cout << std::endl;
             std::cout << "First argument should be the port number." << std::endl;
             std::cout << "Available commands:" << std::endl;
-            std::cout << "[--interactive] or [-i] - starts GuessServer in the interactive mode." << std::endl;
-            std::cout << "[--daemon] or [-d] - starts GuessServer in the daemon mode." << std::endl;
+            std::cout << "[--interactive] or [-i] - starts Server in the interactive mode." << std::endl;
+            std::cout << "[--daemon] or [-d] - starts Server in the daemon mode." << std::endl;
             std::cout << "[--help] or [-h] - help with commands." << std::endl;
             std::cout << std::endl;
             exit(0);
@@ -311,14 +172,14 @@ int main(int argc, char **argv) {
         std::cout << "[--help] or [-h] - help with commands." << std::endl;
         std::cout << std::endl;
     } else if (mode == "-i" || mode == "--interactive") {
-        server_work("GuessServer", port, false, ctx);
+        server_work("Server", port, false, ctx);
     } else if (mode == "-d" || mode == "--daemon") {
         int pid = check(fork());
         if (pid == 0) {
             check(setsid());
             pid = check(fork());
             if (pid == 0) {
-                server_work("GuessServer", port, true, ctx);
+                server_work("Server", port, true, ctx);
             }
         }
     } else {

@@ -1,6 +1,8 @@
 #include "common.hpp"
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <atomic>
+#include <thread>
 
 int main(int argc, char** argv) {
     // SSL init
@@ -21,17 +23,15 @@ int main(int argc, char** argv) {
     
     if (argc != 3) {
         std::cerr << "Usage: " << argv[0] << " <ip> <port>" << std::endl;
-        std::cerr << "Incorrect number of arguments. Try to use key --help." << std::endl;
         exit(-1);
     }
     
     const char* ip = argv[1];
     int port = std::stoi(argv[2]);
 
-    Message msg = { };
     auto dest_address = remote_addr(ip, port);
     int sock_fd = check(make_socket(SOCK_STREAM));
-    check(connect(sock_fd, (sockaddr * ) & dest_address, sizeof(dest_address)));
+    check(connect(sock_fd, (sockaddr*)&dest_address, sizeof(dest_address)));
     
     // Создаем SSL объект
     SSL *ssl = SSL_new(ctx);
@@ -46,68 +46,57 @@ int main(int argc, char** argv) {
         exit(1);
     }
     
-    int min, max;
-    std::cout << "Input min: ";
-    std::cin >> min;
-    std::cout << "Input max: ";
-    std::cin >> max;
+    std::cout << "Connected to " << ip << ":" << port << std::endl;
+    std::cout << "Enter messages (type 'exit' to quit):" << std::endl;
     
-    msg = {0, Start};
-    msg.to_net_order();
-    SSL_write(ssl, &msg, sizeof(msg));
-    msg = {min, SetMin};
-    msg.to_net_order();
-    SSL_write(ssl, &msg, sizeof(msg));
-    msg = {max, SetMax};
-    msg.to_net_order();
-    SSL_write(ssl, &msg, sizeof(msg));
-    auto size = SSL_read(ssl, &msg, sizeof(msg));
+    std::atomic<bool> running{true};
     
-    if (size <= 0) {
-        SSL_shutdown(ssl);
-        SSL_free(ssl);
-        close(sock_fd);
-        SSL_CTX_free(ctx);
-        std::cout << "Server has been disconnected\n";
-        exit(0);
-    }
-    
-    msg.to_host_order();
-    bool success = true;
-    if (msg.status == Guess) {
-        while(true) {
-            int number;
-            std::cout << "Input number: ";
-            std::cin >> number;
-            msg = {number, Number};
-            msg.to_net_order();
-            SSL_write(ssl, &msg, sizeof(msg));
-            auto size = SSL_read(ssl, &msg, sizeof(msg));
-            if (size < 1) {
-                success = false;
+    // Поток для чтения сообщений от сервера
+    std::thread reader_thread([ssl, &running]() {
+        char buffer[4096];
+        while (running) {
+            int bytes = SSL_read(ssl, buffer, sizeof(buffer) - 1);
+            if (bytes <= 0) {
+                if (running) {
+                    std::cout << "\nServer disconnected" << std::endl;
+                }
                 break;
             }
-            msg.to_host_order();
-            if (msg.status == Large)
-                std::cout << "Guessed number is large than " << number << std::endl;
-            else if (msg.status == Less)
-                std::cout << "Guessed number is less than " << number << std::endl;
-            else if (msg.status == Equal) {
-                std::cout << "You win. Guessed number is " << number << std::endl;
-                break;
-            } else
-                std::cout << "Your number is out of guess bounds\n";
+            buffer[bytes] = '\0';
+            std::cout << "\rServer: " << buffer << std::endl;
+            std::cout << "You: " << std::flush;
         }
-    } else
-        std::cout << "The max value has been less or equal to the min value\n";
+    });
+    
+    // Основной поток для отправки сообщений
+    std::string input;
+    while (running) {
+        std::cout << "You: " << std::flush;
+        if (!std::getline(std::cin, input)) {
+            break;
+        }
+        
+        if (input == "exit") {
+            running = false;
+            break;
+        }
+        
+        int bytes = SSL_write(ssl, input.c_str(), input.length());
+        if (bytes <= 0) {
+            std::cerr << "Failed to send message" << std::endl;
+            break;
+        }
+    }
+    
+    running = false;
+    if (reader_thread.joinable()) {
+        reader_thread.join();
+    }
     
     SSL_shutdown(ssl);
     SSL_free(ssl);
     close(sock_fd);
     SSL_CTX_free(ctx);
-    
-    if (!success)
-        std::cout << "Server has been disconnected\n";
     
     return 0;
 }
