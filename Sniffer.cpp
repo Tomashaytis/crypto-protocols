@@ -16,7 +16,9 @@
 #include "windivert.h"
 
 // ======= HARD-CODE HERE =======
-static const int HOST_PORT = 8888;   // port
+static const int HOST_PORT = 8888;
+static const char* HOST_LAN_IP = "10.122.255.76";      // IP Windows LAN/Wi-Fi
+static const char* VM_IP = "192.168.23.194";   // IP Ubuntu VM (NAT/VMnet8)// port
 // ==============================
 
 static std::string ipToStr(UINT32 ip_net_order) {
@@ -27,33 +29,10 @@ static std::string ipToStr(UINT32 ip_net_order) {
     return buf;
 }
 
-static std::string getLocalIPv4() {
-    char name[256]{};
-    if (gethostname(name, sizeof(name)) != 0) return "";
-
-    addrinfo hints{};
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-
-    addrinfo* res = nullptr;
-    if (getaddrinfo(name, nullptr, &hints, &res) != 0) return "";
-
-    std::string ip;
-    for (addrinfo* p = res; p; p = p->ai_next) {
-        sockaddr_in* sin = (sockaddr_in*)p->ai_addr;
-        char buf[64]{};
-        inet_ntop(AF_INET, &sin->sin_addr, buf, sizeof(buf));
-        // Skip 127.0.0.1, take first real IPv4
-        if (strcmp(buf, "127.0.0.1") != 0) { ip = buf; break; }
-    }
-    freeaddrinfo(res);
-    return ip;
-}
-
 int main(int argc, char** argv) {
 
 
-	int mode = 1; // default 1: allow, if 2:block
+    int mode = 2; // default 1: allow, if 2:block
     bool block = (mode == 2);
 
     if (mode != 1 && mode != 2) {
@@ -68,18 +47,21 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::string localIp = getLocalIPv4();
-    if (localIp.empty()) {
-        std::cerr << "Failed to detect local IPv4.\n";
-        WSACleanup();
-        return 1;
-    }
-
-    // Filter: inbound TCP packets destined to THIS machine (localIp) and HOST_PORT
     char filter[512];
     snprintf(filter, sizeof(filter),
-        "inbound and ip and tcp and ip.DstAddr == %s and tcp.DstPort == %d",
-        localIp.c_str(), HOST_PORT
+        "("
+        "  (inbound  and ip and tcp and ip.DstAddr == %s and tcp.DstPort == %d)"  // client -> host:8888
+        "  or "
+        "  (outbound and ip and tcp and ip.DstAddr == %s and tcp.DstPort == %d)"  // host -> vm:8888 (forward)
+        "  or "
+        "  (inbound  and ip and tcp and ip.SrcAddr == %s and tcp.SrcPort == %d)"  // vm -> host (reply from 8888)
+        "  or "
+        "  (outbound and ip and tcp and ip.SrcAddr == %s and tcp.SrcPort == %d)"  // host -> client (reply from 8888)
+        ")",
+        HOST_LAN_IP, HOST_PORT,
+        VM_IP, HOST_PORT,
+        VM_IP, HOST_PORT,
+        HOST_LAN_IP, HOST_PORT
     );
 
     HANDLE handle = WinDivertOpen(filter, WINDIVERT_LAYER_NETWORK, 0, 0);
@@ -91,7 +73,7 @@ int main(int argc, char** argv) {
     }
 
     std::cout << "Sniffer started.\n";
-    std::cout << "Local IP: " << localIp << "\n";
+    std::cout << "Local IP: " << HOST_LAN_IP << "\n";
     std::cout << "Port    : " << HOST_PORT << "\n";
     std::cout << "Filter  : " << filter << "\n";
     std::cout << (block ? "Mode: BLOCK (drop)\n" : "Mode: ALLOW (pass)\n");
